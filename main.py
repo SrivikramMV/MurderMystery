@@ -1,18 +1,27 @@
+import os
+os.environ["OMP_NUM_THREADS"] = os.environ["OPENBLAS_NUM_THREADS"] = "2"
+
 from dataclasses import dataclass
 from typing import List, Dict
 
-from transformers import AutoModelForCausalLM, AutoTokenizer
+import torch
+from huggingface_hub import hf_hub_download
+from llama_cpp import Llama
 
-MODEL_NAME = "Qwen/Qwen3-0.6B"
+MODEL_REPO = "Qwen/Qwen3-0.6B-GGUF"
+MODEL_FILE = "Qwen3-0.6B-Q4_K_M.gguf"
+
+llm: Llama
 
 
-def load_model():
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
-    model = AutoModelForCausalLM.from_pretrained(
-        MODEL_NAME, device_map="auto", trust_remote_code=True
+def load_model() -> Llama:
+    model_path = hf_hub_download(repo_id=MODEL_REPO, filename=MODEL_FILE)
+    return Llama(
+        model_path=model_path,
+        chat_format="qwen",
+        n_ctx=1024,
+        n_gpu_layers=-1 if torch.cuda.is_available() else 0,
     )
-    return tokenizer, model
-
 
 @dataclass
 class Suspect:
@@ -69,18 +78,8 @@ def system_prompt(suspect: Suspect) -> str:
         "Answer in natural language, 1-3 sentences unless the detective asks for detail."
     )
 
-
-def generate_response(history: List[Dict[str, str]], tokenizer, model, max_new_tokens: int = 128) -> str:
-    prompt = tokenizer.apply_chat_template(history, tokenize=False, add_generation_prompt=True)
-    input_ids = tokenizer(prompt, return_tensors="pt").input_ids.to(model.device)
-    output_ids = model.generate(
-        input_ids,
-        max_new_tokens=max_new_tokens,
-        do_sample=True,
-        temperature=0.7,
-        pad_token_id=tokenizer.eos_token_id,
-    )
-    reply = tokenizer.decode(output_ids[0][input_ids.shape[-1]:], skip_special_tokens=True)
+def generate_response(history: List[Dict[str, str]]) -> str:
+    reply = llm.create_chat_completion(history)["choices"][0]["message"]["content"]
     return reply.strip()
 
 
@@ -92,7 +91,9 @@ def accusation(suspects: List[Suspect], name: str) -> bool:
 
 
 def main():
-    tokenizer, model = load_model()
+    global llm
+    llm = load_model()
+
     histories: Dict[str, List[Dict[str, str]]] = {
         s.name: [{"role": "system", "content": system_prompt(s)}] for s in SUSPECTS
     }
@@ -130,7 +131,7 @@ def main():
                 return
             history.append({"role": "user", "content": user_input})
             try:
-                reply = generate_response(history, tokenizer, model)
+                reply = generate_response(history)
             except Exception as e:
                 reply = f"[Model error: {e}]"
             history.append({"role": "assistant", "content": reply})
