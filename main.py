@@ -23,7 +23,6 @@ def load_model() -> Llama:
         n_gpu_layers=-1 if torch.cuda.is_available() else 0,
     )
 
-
 @dataclass
 class Suspect:
     name: str
@@ -79,7 +78,6 @@ def system_prompt(suspect: Suspect) -> str:
         "Answer in natural language, 1-3 sentences unless the detective asks for detail."
     )
 
-
 def generate_response(history: List[Dict[str, str]]) -> str:
     reply = llm.create_chat_completion(history)["choices"][0]["message"]["content"]
     return reply.strip()
@@ -95,6 +93,7 @@ def accusation(suspects: List[Suspect], name: str) -> bool:
 def main():
     global llm
     llm = load_model()
+
     histories: Dict[str, List[Dict[str, str]]] = {
         s.name: [{"role": "system", "content": system_prompt(s)}] for s in SUSPECTS
     }
