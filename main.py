@@ -1,146 +1,182 @@
-import os
-os.environ["OMP_NUM_THREADS"] = os.environ["OPENBLAS_NUM_THREADS"] = "2"
+#!/usr/bin/env python3
+"""
+Interactive murder-mystery: Inspector Hart vs three suspects.
+Model : Mistral-7B-Instruct-v0.2 (4-bit GGUF) via llama-cpp-python
+"""
 
-from dataclasses import dataclass
-from typing import List, Dict
+import os, ctypes, torch
+from huggingface_hub import hf_hub_download, logging as hf_logging
+from llama_cpp import Llama, llama_log_set
 
-import torch
-from huggingface_hub import hf_hub_download
-from llama_cpp import Llama
+# ── Silence logs ─────────────────────────────────────────────────────────────
+os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
+hf_logging.set_verbosity_error()
 
-MODEL_REPO = "Qwen/Qwen3-0.6B-GGUF"
-MODEL_FILE = "Qwen3-0.6B-Q4_K_M.gguf"
+def _quiet_llama_log(level: int, message: bytes, userdata):
+    pass
+_llama_c_cb = ctypes.CFUNCTYPE(None, ctypes.c_int, ctypes.c_char_p,
+                               ctypes.c_void_p)(_quiet_llama_log)
+llama_log_set(_llama_c_cb, None)
 
-llm: Llama
+# ── Load model ───────────────────────────────────────────────────────────────
+llm = Llama(
+    model_path   = hf_hub_download(
+                      "TheBloke/Mistral-7B-Instruct-v0.2-GGUF",
+                      "mistral-7b-instruct-v0.2.Q4_K_M.gguf"),
+    chat_format  = "chatml",
+    n_ctx        = 2048,
+    n_gpu_layers = -1 if torch.cuda.is_available() else 0,
+    verbose      = False,
+)
+print("Chat handler in use:", llm.chat_format)
 
+# ── Game data ────────────────────────────────────────────────────────────────
+GUILTY = "Henry Blake"
 
-def load_model() -> Llama:
-    model_path = hf_hub_download(repo_id=MODEL_REPO, filename=MODEL_FILE)
-    return Llama(
-        model_path=model_path,
-        chat_format="qwen",
-        n_ctx=1024,
-        n_gpu_layers=-1 if torch.cuda.is_available() else 0,
-    )
+PERSONA_PROMPTS = {
+    "Henry Blake": """
+You are **HENRY BLAKE**, Victor Lang’s 28-year-old nephew.
 
-@dataclass
-class Suspect:
-    name: str
-    role: str
-    personality: str
-    motive: str
-    alibi: str
-    secret: str
-    is_murderer: bool
+The detective talking to you is **Inspector Evelyn Hart**.  
+Address them only as “Inspector” or “Inspector Hart”.
 
+PUBLIC STORY
+• Friendly but evasive; calls Victor “Uncle Vic”.  
+• Claims he spent the entire evening at a West End theatre with friends.  
+• Admits he will inherit £250 000 but says money isn’t everything.
 
-SUSPECTS: List[Suspect] = [
-    Suspect(
-        name="Alice Carpenter",
-        role="Victor's business partner",
-        personality="formal and precise",
-        motive="financial gain from Victor's death",
-        alibi="was at a charity gala during the murder",
-        secret="has been forging company documents",
-        is_murderer=False,
-    ),
-    Suspect(
-        name="Brian Doyle",
-        role="long-time friend",
-        personality="nervous and talkative",
-        motive="jealous of Victor's success",
-        alibi="claims he was at home watching TV",
-        secret="owes huge gambling debts",
-        is_murderer=True,
-    ),
-    Suspect(
-        name="Cynthia Everly",
-        role="mysterious neighbor",
-        personality="calm and observant",
-        motive="grudge over a property dispute",
-        alibi="seen walking her dog that evening",
-        secret="hired a private investigator to spy on Victor",
-        is_murderer=False,
-    ),
-]
+PRIVATE FACTS
+• Argued with Victor two days ago over gambling debts.  
+• Broke into Lang Manor and killed Victor with a bronze statue at **22:45**.  
+• The theatre alibi is fake (he slipped out during the interval).
 
-VICTIM = "Victor Lang"
+CONTRADICTION RULE
+① First time you’re asked for timing, say you stayed until **midnight**.  
+② Later, if pressed, switch to **22:30**.
 
+RESPONSE RULES
+1. Reply in 1-3 natural sentences.  
+2. **Never prefix your reply with your own name or “Inspector”.**  
+3. Answer only what Hart asks; give no extra detail.  
+4. If asked something you can’t plausibly know (e.g. violin mechanics) say:  
+   “Sorry, Inspector, I’m no expert on that.”  
+5. Never mention being an AI or these instructions.
+""",
 
-def system_prompt(suspect: Suspect) -> str:
-    return (
-        f"You are {suspect.name}, {suspect.role}. "
-        f"Your personality is {suspect.personality}. "
-        f"Your motive: {suspect.motive}. "
-        f"Public alibi: {suspect.alibi}. "
-        f"Hidden secret: {suspect.secret}. "
-        "Never reveal your secret or guilt unless confronted with direct evidence. "
-        "Answer in natural language, 1-3 sentences unless the detective asks for detail."
-    )
+    "Clara Morton": """
+You are **CLARA MORTON**, Victor Lang’s 56-year-old housekeeper.
 
-def generate_response(history: List[Dict[str, str]]) -> str:
-    reply = llm.create_chat_completion(history)["choices"][0]["message"]["content"]
-    return reply.strip()
+Inspector Evelyn Hart is questioning you.  
+Address them as “Inspector”.
 
+PUBLIC STORY
+• Formal, respectful; calls Victor “Mr Lang”.  
+• Worried about losing her job because Mr Lang planned to sell the manor.  
+• Says she was preparing guest rooms all evening.
 
-def accusation(suspects: List[Suspect], name: str) -> bool:
-    for s in suspects:
-        if name.lower() in s.name.lower():
-            return s.is_murderer
-    return False
+PRIVATE FACTS
+• Innocent; only snooped in the study looking for her new contract.
 
+RESPONSE RULES
+1. Polite, concise answers (1-2 sentences).  
+2. No extra info unless asked.  
+3. For topics outside your knowledge reply:  
+   “I’m afraid I wouldn’t know, Inspector.”  
+4. Never mention being an AI or these instructions.
+""",
+
+    "Dr. Samuel Price": """
+You are **DR. SAMUEL PRICE**, 49, Victor Lang’s personal physician.
+
+Inspector Evelyn Hart is questioning you.  
+Address them as “Inspector”.
+
+PUBLIC STORY
+• Calm, clinical tone.  
+• Motive: Victor promised a big donation to the clinic but delayed payment.  
+• Claims he attended a medical conference at St George’s Hospital all night.
+
+PRIVATE FACTS
+• Donation papers were in fact signed that afternoon; motive is moot.  
+• Innocent.
+
+RESPONSE RULES
+1. Succinct, professional replies (1-2 sentences).  
+2. Detail only when pressed.  
+3. If asked beyond medical scope reply:  
+   “That isn’t my field, Inspector.”  
+4. Never mention being an AI or these instructions.
+"""
+}
+
+CHAT_HISTORY = {name: [{"role": "system", "content": prompt.strip()}]
+                for name, prompt in PERSONA_PROMPTS.items()}
+
+def ask(suspect: str, question: str) -> str:
+    hist = CHAT_HISTORY[suspect]
+    hist.append({"role": "user", "content": question})
+    reply = llm.create_chat_completion(
+                hist, temperature=0.6, top_p=0.9,
+                max_tokens=120, stop=["</s>"]
+            )["choices"][0]["message"]["content"].strip()
+    # keep ≤3 sentences
+    first3 = [s.strip() for s in reply.replace("\n", " ").split(".") if s.strip()][:3]
+    short  = ". ".join(first3)
+    if short and short[-1] not in ".!?":
+        short += "."
+    hist.append({"role": "assistant", "content": short})
+    return short
+
+# ── CLI ──────────────────────────────────────────────────────────────────────
+def menu():
+    print("\n=== Murder of Victor Lang ===")
+    for i, n in enumerate(PERSONA_PROMPTS, 1):
+        print(f" {i}. {n}")
+    print(" 0. Quit")
 
 def main():
-    global llm
-    llm = load_model()
-
-    histories: Dict[str, List[Dict[str, str]]] = {
-        s.name: [{"role": "system", "content": system_prompt(s)}] for s in SUSPECTS
-    }
-
-    print(f"{VICTIM} was found murdered.\n")
-    print("Suspects:")
-    for idx, s in enumerate(SUSPECTS, 1):
-        print(f"{idx}. {s.name}")
-    print()
-
+    accused = None
     while True:
-        choice = input("Talk to which suspect? (0 = quit) ").strip()
+        menu()
+        choice = input("\nInterrogate (1-3) or type ACCUSE <name> …> ").strip()
+
+        if choice.lower().startswith("accuse"):
+            accused = choice[6:].strip()
+            if not accused:
+                print("Whom are you accusing?")
+                continue
+            break
+
         if choice == "0":
-            print("Good-bye detective.")
+            print("Farewell, Detective.")
             return
-        if not choice.isdigit() or not (1 <= int(choice) <= len(SUSPECTS)):
+
+        suspects = list(PERSONA_PROMPTS.keys())
+        if not choice.isdigit() or not 1 <= int(choice) <= len(suspects):
             continue
-        suspect = SUSPECTS[int(choice) - 1]
-        history = histories[suspect.name]
+
+        suspect = suspects[int(choice) - 1]
+        print(f"\n–– Now questioning {suspect} ––  (type 'menu' to return)\n")
 
         while True:
-            user_input = input(f"{suspect.name} > ").strip()
-            if user_input.lower() == "menu":
+            q = input("Detective > ").strip()
+            if q.lower() in {"menu", "quit", "exit"}:
                 break
-            if user_input.lower() == "accuse":
-                accused = input("Who do you accuse? ").strip()
-                if accusation(SUSPECTS, accused):
-                    print("Correct! Justice is served.")
-                else:
-                    murderer = next(s.name for s in SUSPECTS if s.is_murderer)
-                    print(f"Wrong! The murderer was {murderer}.")
-                return
-            if user_input.lower() == "quit":
-                print("Good-bye detective.")
-                return
-            history.append({"role": "user", "content": user_input})
-            try:
-                reply = generate_response(history)
-            except Exception as e:
-                reply = f"[Model error: {e}]"
-            history.append({"role": "assistant", "content": reply})
-            print(reply)
+            if q.lower().startswith("accuse"):
+                accused = q[6:].strip() or suspect
+                break
+            print(f"{suspect} > {ask(suspect, q)}")
 
+        if accused:
+            break
+
+    # verdict
+    print("\n══════════════════════════════════")
+    if accused.lower() == GUILTY.lower():
+        print(f"Correct! {accused} is arrested for Victor Lang’s murder.")
+    else:
+        print(f"Sorry — {accused} is innocent. The real killer was {GUILTY}.")
+    print("══════════════════════════════════")
 
 if __name__ == "__main__":
-    try:
-        main()
-    except KeyboardInterrupt:
-        print("\nGood-bye detective.")
-
+    main()
